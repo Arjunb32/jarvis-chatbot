@@ -1,5 +1,6 @@
 google-genai
 SpeechRecognition
 pyttsx3
-pyaudio
 colorama
+sounddevice
+numpy

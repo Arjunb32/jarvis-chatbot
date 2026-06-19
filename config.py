@@ -29,6 +29,13 @@ MAX_VOICE_RETRIES = 2
 VOICE_TIMEOUT = 6
 VOICE_PHRASE_TIME_LIMIT = 10
 AMBIENT_NOISE_DURATION = 1
+VOICE_RECORD_SECONDS = 5
+MIC_DEVICE_INDEX = os.getenv("MIC_DEVICE_INDEX", "")
+PREFERRED_MICROPHONE_KEYWORDS = (
+    "microphone array",
+    "microphone",
+    "input",
+)
 
 # Logging
 LOG_FILE = "conversation_log.txt"
