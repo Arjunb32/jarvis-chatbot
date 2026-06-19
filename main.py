@@ -1,31 +1,20 @@
-"""
-main.py — JARVIS AI Chatbot
-IEEE RAS TRIGGER Daily Task | 18/06/26
-Author: Arjun, SCT College of Engineering, Thiruvananthapuram
-"""
+"""JARVIS-style chatbot with text, voice, TTS, logging, and Gemini support."""
 
+import datetime as dt
 import os
+import re
 import sys
-import datetime
 import webbrowser
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
+from colorama import Fore, Style, init
 import pyttsx3
 import speech_recognition as sr
-from colorama import init, Fore, Style
 
 import config
 
-# ── Anthropic client (lazy import so text-only mode works without the key) ──
-try:
-    import anthropic
-    _ANTHROPIC_AVAILABLE = True
-except ImportError:
-    _ANTHROPIC_AVAILABLE = False
 
-init(autoreset=True)  # colorama
-
-# ───────────────────────────── ASCII BANNER ─────────────────────────────────
+ConversationHistory = List[Dict[str, str]]
 
 BANNER = rf"""
 {Fore.CYAN}     ██╗ █████╗ ██████╗ ██╗   ██╗██╗███████╗
@@ -37,191 +26,342 @@ BANNER = rf"""
 {Style.DIM}         Just A Rather Very Intelligent System
 {Style.RESET_ALL}"""
 
-# ───────────────────────────── TTS ──────────────────────────────────────────
+HELP_TEXT = (
+    "Available commands: hello, what is your name, time, date, open google, "
+    "open youtube, open github, open notepad, help, and bye. You can also ask "
+    "general questions; Gemini answers them when GEMINI_API_KEY is set."
+)
 
-def init_tts() -> pyttsx3.Engine:
-    """Initialise and configure the text-to-speech engine."""
-    engine = pyttsx3.init()
-    engine.setProperty("rate", config.TTS_RATE)
-    engine.setProperty("volume", config.TTS_VOLUME)
-    # Prefer a male voice if available (more JARVIS-like)
-    voices = engine.getProperty("voices")
-    for voice in voices:
-        if "male" in voice.name.lower() or "david" in voice.name.lower():
-            engine.setProperty("voice", voice.id)
-            break
-    return engine
+EXIT_TOKEN = "__EXIT__"
 
 
-def speak(engine: pyttsx3.Engine, text: str) -> None:
-    """Speak *text* aloud using the TTS engine."""
+def init_tts() -> Optional[Any]:
+    """Initialize and configure the text-to-speech engine."""
+    try:
+        engine = pyttsx3.init()
+        engine.setProperty("rate", config.TTS_RATE)
+        engine.setProperty("volume", config.TTS_VOLUME)
+
+        voices = engine.getProperty("voices")
+        for voice in voices:
+            voice_name = getattr(voice, "name", "").lower()
+            if "male" in voice_name or "david" in voice_name:
+                engine.setProperty("voice", voice.id)
+                break
+
+        return engine
+    except (ImportError, RuntimeError, OSError, AttributeError) as error:
+        print_warn(f"Text-to-speech is unavailable: {error}")
+        return None
+
+
+def speak(engine: Optional[Any], text: str) -> None:
+    """Speak text aloud when the TTS engine is available."""
+    if engine is None:
+        return
+
     try:
         engine.say(text)
         engine.runAndWait()
-    except RuntimeError:
-        # Engine already running in some edge cases — skip gracefully
-        pass
+    except (RuntimeError, OSError, AttributeError) as error:
+        print_warn(f"Text-to-speech failed: {error}")
 
-
-# ───────────────────────────── LOGGING ──────────────────────────────────────
 
 def log(speaker: str, message: str) -> None:
-    """Append a timestamped line to the conversation log file."""
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(config.LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"[{timestamp}] {speaker}: {message}\n")
+    """Append a timestamped message to the conversation log file."""
+    timestamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(config.LOG_FILE, "a", encoding="utf-8") as log_file:
+        log_file.write(f"[{timestamp}] {speaker}: {message}\n")
 
 
-def log_divider(label: str = "SESSION STARTED") -> None:
-    """Write a session boundary marker to the log."""
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(config.LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"[{timestamp}] --- {label} ---\n")
+def log_divider(label: str) -> None:
+    """Append a timestamped session divider to the conversation log file."""
+    timestamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(config.LOG_FILE, "a", encoding="utf-8") as log_file:
+        log_file.write(f"[{timestamp}] --- {label} ---\n")
 
-
-# ───────────────────────────── OUTPUT ───────────────────────────────────────
 
 def print_jarvis(text: str) -> None:
-    """Print JARVIS's response in cyan."""
+    """Print a JARVIS response in cyan."""
     print(f"{Fore.CYAN}{config.JARVIS_NAME}: {text}{Style.RESET_ALL}")
 
 
 def print_user(text: str) -> None:
-    """Print the user's input in default colour."""
-    print(f"You: {text}")
+    """Print user text in the default console color."""
+    print(f"{Fore.WHITE}You: {text}{Style.RESET_ALL}")
 
 
 def print_warn(text: str) -> None:
-    """Print a system/warning message in yellow."""
+    """Print system warnings in yellow."""
     print(f"{Fore.YELLOW}[!] {text}{Style.RESET_ALL}")
 
 
-# ───────────────────────────── VOICE INPUT ──────────────────────────────────
+def configure_console() -> None:
+    """Use UTF-8 console output when Python exposes stream reconfiguration."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+
+
+def deliver_response(engine: Optional[Any], response: str) -> None:
+    """Print, speak, and log one JARVIS response."""
+    print_jarvis(response)
+    speak(engine, response)
+    log(config.JARVIS_NAME, response)
+
 
 def check_voice_available() -> bool:
-    """Return True if PyAudio and a microphone are accessible."""
+    """Return True if SpeechRecognition can access a microphone."""
     try:
-        import pyaudio  # noqa: F401
-        rec = sr.Recognizer()
-        with sr.Microphone() as _:
-            pass
-        return True
+        microphone_names = sr.Microphone.list_microphone_names()
+        if not microphone_names:
+            return False
+
+        with sr.Microphone():
+            return True
     except (ImportError, OSError, AttributeError):
         return False
 
 
-def listen(recognizer: sr.Recognizer, retries: int = config.MAX_VOICE_RETRIES) -> Optional[str]:
-    """
-    Listen through the microphone and return recognised text.
-    Returns None after exhausting *retries* attempts.
-    """
-    for attempt in range(1, retries + 1):
+def listen(
+    recognizer: sr.Recognizer,
+    retries: int = config.MAX_VOICE_RETRIES,
+) -> Optional[str]:
+    """Listen through the microphone and return recognized text."""
+    attempts = retries + 1
+
+    for attempt in range(1, attempts + 1):
         try:
             with sr.Microphone() as source:
-                print_warn(f"Listening… (attempt {attempt}/{retries})")
-                recognizer.adjust_for_ambient_noise(source, duration=0.8)
-                audio = recognizer.listen(source, timeout=6, phrase_time_limit=10)
+                print_warn(f"Calibrating microphone... attempt {attempt}/{attempts}")
+                recognizer.adjust_for_ambient_noise(
+                    source,
+                    duration=config.AMBIENT_NOISE_DURATION,
+                )
+                print_warn("Listening...")
+                audio = recognizer.listen(
+                    source,
+                    timeout=config.VOICE_TIMEOUT,
+                    phrase_time_limit=config.VOICE_PHRASE_TIME_LIMIT,
+                )
 
             text = recognizer.recognize_google(audio)
             print_user(text)
-            return text.lower()
+            return text.strip()
 
         except sr.WaitTimeoutError:
-            print_warn("No speech detected. Please speak after the prompt.")
+            print_warn("No speech detected. Please try again.")
         except sr.UnknownValueError:
-            print_warn("Could not understand that. Please try again.")
-        except sr.RequestError as exc:
-            print_warn(f"Google Speech service error: {exc}")
-            break  # Network issue — no point retrying
+            print_warn("Sorry, I could not understand that. Please try again.")
+        except sr.RequestError as error:
+            print_warn(f"Speech recognition service failed: {error}")
+            return None
+        except (OSError, AttributeError) as error:
+            print_warn(f"Microphone failed: {error}")
+            return None
 
     return None
 
 
-# ───────────────────────────── LOCAL COMMANDS ───────────────────────────────
-
 def get_local_response(user_input: str) -> Optional[str]:
-    """
-    Handle fast deterministic commands locally.
-    Returns a response string, or None if the input should go to Claude.
-    """
-    inp = user_input.strip().lower()
+    """Handle local commands and return None for general AI questions."""
+    text = user_input.strip().lower()
 
-    if any(w in inp for w in ("hello", "hi", "hey")):
+    if _contains_word(text, ("exit", "quit", "bye", "goodbye", "stop")):
+        return EXIT_TOKEN
+
+    if _contains_word(text, ("hello", "hi", "hey")):
         return f"Hello {config.USER_NAME}! Systems online. What do you need?"
 
-    if "time" in inp:
-        now = datetime.datetime.now().strftime("%I:%M %p")
-        return f"The current time is {now}."
+    if "help" in text:
+        return HELP_TEXT
 
-    if "date" in inp:
-        today = datetime.datetime.now().strftime("%A, %d %B %Y")
-        return f"Today is {today}."
-
-    if "open google" in inp:
-        webbrowser.open("https://google.com")
-        return "Opening Google for you."
-
-    if "open youtube" in inp:
-        webbrowser.open("https://youtube.com")
-        return "Opening YouTube. Don't get distracted, Arjun."
-
-    if "open github" in inp:
-        webbrowser.open("https://github.com")
-        return "Opening GitHub."
-
-    if "open notepad" in inp:
-        if sys.platform == "win32":
-            os.system("notepad")
-            return "Notepad is open."
-        return "Notepad is a Windows-only command. Try gedit or nano on Linux."
-
-    if any(w in inp for w in ("your name", "who are you", "what are you")):
+    if "what is your name" in text or "your name" in text or "who are you" in text:
         return (
-            "I am JARVIS — Just A Rather Very Intelligent System. "
-            f"Personal assistant to {config.USER_NAME}, at your service."
+            f"I am {config.JARVIS_NAME}, your JARVIS-style assistant for this "
+            "chatbot demo."
         )
 
-    if any(w in inp for w in ("bye", "exit", "quit", "stop", "goodbye")):
-        return "__EXIT__"
+    if "time" in text:
+        current_time = dt.datetime.now().strftime("%I:%M %p")
+        return f"The current time is {current_time}."
 
-    return None  # Let Claude handle it
+    if "date" in text or "today's date" in text or "today’s date" in text:
+        current_date = dt.datetime.now().strftime("%A, %d %B %Y")
+        return f"Today is {current_date}."
+
+    if "open google" in text:
+        return open_website("https://google.com", "Opening Google for you, Arjun.")
+
+    if "open youtube" in text:
+        return open_website("https://youtube.com", "Opening YouTube for you, Arjun.")
+
+    if "open github" in text:
+        return open_website("https://github.com", "Opening GitHub for you, Arjun.")
+
+    if "open notepad" in text:
+        return open_notepad()
+
+    return None
 
 
-# ───────────────────────────── CLAUDE API ───────────────────────────────────
-
-def get_ai_response(history: list[dict]) -> str:
-    """Send the conversation history to Claude and return the reply."""
-    if not _ANTHROPIC_AVAILABLE:
-        return "The Anthropic library is not installed. Please run: pip install anthropic"
-
-    if config.ANTHROPIC_API_KEY == "your-api-key-here":
-        return (
-            "I don't have a live API key right now, but I'm still here for local commands. "
-            "Set ANTHROPIC_API_KEY in config.py to unlock full AI responses."
-        )
+def get_ai_response(history: ConversationHistory) -> str:
+    """Return a Gemini answer, or a useful offline fallback when unavailable."""
+    if not config.GEMINI_API_KEY:
+        return config.OFFLINE_FALLBACK_RESPONSE
 
     try:
-        client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-        response = client.messages.create(
-            model=config.CLAUDE_MODEL,
-            max_tokens=config.CLAUDE_MAX_TOKENS,
-            system=config.SYSTEM_PROMPT,
-            messages=history,
+        from google import genai
+        from google.genai import errors, types
+        import httpx
+        import requests
+    except ImportError:
+        return config.GEMINI_PACKAGE_MISSING_RESPONSE
+
+    api_error_types = (
+        errors.APIError,
+        httpx.HTTPError,
+        requests.RequestException,
+        RuntimeError,
+        ValueError,
+        OSError,
+        TimeoutError,
+    )
+
+    try:
+        client = genai.Client(api_key=config.GEMINI_API_KEY)
+        contents = build_gemini_contents(history, types)
+        response = client.models.generate_content(
+            model=config.GEMINI_MODEL,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=config.SYSTEM_PROMPT,
+                max_output_tokens=config.GEMINI_MAX_OUTPUT_TOKENS,
+                temperature=config.GEMINI_TEMPERATURE,
+            ),
         )
-        return response.content[0].text
-    except anthropic.AuthenticationError:
-        return "API authentication failed. Check your key in config.py."
-    except anthropic.APIConnectionError:
-        return "Could not reach the Anthropic API. Check your internet connection."
-    except anthropic.RateLimitError:
-        return "Rate limit hit. Give me a moment before the next question."
-    except Exception as exc:  # noqa: BLE001
-        return f"Unexpected API error: {exc}"
+        response_text = getattr(response, "text", "").strip()
+        return response_text or config.GEMINI_EMPTY_RESPONSE
+    except api_error_types as error:
+        print_warn(f"Gemini request failed: {error}")
+        return config.GEMINI_API_ERROR_RESPONSE
+    finally:
+        client_to_close = locals().get("client")
+        if client_to_close is not None:
+            close_client(client_to_close)
 
 
-# ───────────────────────────── MAIN LOOP ────────────────────────────────────
+def build_gemini_contents(history: ConversationHistory, types_module: Any) -> List[Any]:
+    """Convert local conversation history into Gemini content objects."""
+    contents: List[Any] = []
+    recent_history = history[-12:]
+
+    for message in recent_history:
+        role = "model" if message["role"] == "assistant" else "user"
+        contents.append(
+            types_module.Content(
+                role=role,
+                parts=[types_module.Part.from_text(text=message["content"])],
+            )
+        )
+
+    return contents
+
+
+def close_client(client: Any) -> None:
+    """Close a Gemini client when the SDK exposes a close method."""
+    close_method = getattr(client, "close", None)
+    if close_method is None:
+        return
+
+    try:
+        close_method()
+    except (RuntimeError, OSError, AttributeError):
+        return
+
+
+def open_website(url: str, success_message: str) -> str:
+    """Open a website and return a friendly status message."""
+    try:
+        webbrowser.open(url)
+        return success_message
+    except webbrowser.Error as error:
+        print_warn(f"Could not open browser: {error}")
+        return "I could not open that website from this environment, Arjun."
+
+
+def open_notepad() -> str:
+    """Open Windows Notepad when available."""
+    if sys.platform != "win32":
+        return "Notepad is only available from this demo on Windows."
+
+    try:
+        os.system("notepad")
+        return "Opening Notepad for you, Arjun."
+    except OSError as error:
+        print_warn(f"Could not open Notepad: {error}")
+        return "I could not open Notepad from this environment, Arjun."
+
+
+def print_menu(voice_available: bool) -> None:
+    """Print the input mode menu."""
+    print()
+    print(f"{Fore.CYAN}┌─ Select input mode ───────────┐{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}│  [1] Text                     │{Style.RESET_ALL}")
+    if voice_available:
+        print(f"{Fore.CYAN}│  [2] Voice                    │{Style.RESET_ALL}")
+    else:
+        print(f"{Fore.YELLOW}│  [2] Voice  (unavailable)     │{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}│  [3] Exit                     │{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}└───────────────────────────────┘{Style.RESET_ALL}")
+
+
+def read_text_turn() -> Optional[str]:
+    """Read a keyboard input turn."""
+    raw = input("You: ").strip()
+    return raw or None
+
+
+def read_user_turn(
+    choice: str,
+    recognizer: sr.Recognizer,
+    voice_available: bool,
+) -> Optional[str]:
+    """Read one user turn from the selected input mode."""
+    if choice == "1":
+        return read_text_turn()
+
+    if choice == "2":
+        if not voice_available:
+            print_warn("Voice mode is unavailable on this machine.")
+            return None
+
+        voice_text = listen(recognizer)
+        if voice_text:
+            return voice_text
+
+        print_warn("Voice input failed. Please type your request instead.")
+        return read_text_turn()
+
+    print_warn("Invalid choice. Enter 1, 2, or 3.")
+    return None
+
+
+def _contains_word(text: str, words: tuple) -> bool:
+    """Return True when text contains any whole word from words."""
+    return any(re.search(rf"\b{re.escape(word)}\b", text) for word in words)
+
 
 def main() -> None:
+    """Run the JARVIS chatbot."""
+    configure_console()
+    init(autoreset=True)
     print(BANNER)
 
     engine = init_tts()
@@ -229,94 +369,53 @@ def main() -> None:
     voice_available = check_voice_available()
 
     if not voice_available:
-        print_warn("No microphone / PyAudio detected — voice mode disabled.")
+        print_warn("No microphone or PyAudio detected. Voice mode is disabled.")
 
-    greeting = f"Hello {config.USER_NAME}, I am {config.JARVIS_NAME}. How can I assist you today?"
-    print_jarvis(greeting)
-    speak(engine, greeting)
-
+    greeting = (
+        f"Hello {config.USER_NAME}, I am {config.JARVIS_NAME}. "
+        "How can I assist you today?"
+    )
     log_divider("SESSION STARTED")
-    log(config.JARVIS_NAME, greeting)
+    deliver_response(engine, greeting)
 
-    conversation_history: list[dict] = []
-    message_count: int = 0
+    conversation_history: ConversationHistory = []
+    message_count = 0
 
     while True:
-        # ── Input mode menu ──────────────────────────────────────────────────
-        print()
-        print(f"{Fore.CYAN}┌─ Select input mode ───────────┐{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}│  [1] Text                     │{Style.RESET_ALL}")
-        if voice_available:
-            print(f"{Fore.CYAN}│  [2] Voice                    │{Style.RESET_ALL}")
-        else:
-            print(f"{Fore.YELLOW}│  [2] Voice  (unavailable)     │{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}│  [3] Exit                     │{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}└───────────────────────────────┘{Style.RESET_ALL}")
-
+        print_menu(voice_available)
         choice = input("> ").strip()
 
         if choice == "3":
             break
 
-        # ── Capture user input ───────────────────────────────────────────────
-        user_text: Optional[str] = None
-
-        if choice == "1":
-            raw = input("You: ").strip()
-            if raw:
-                user_text = raw.lower()
-                log("User", raw)
-
-        elif choice == "2":
-            if not voice_available:
-                print_warn("Voice mode is unavailable on this machine.")
-                continue
-            user_text = listen(recognizer)
-            if user_text:
-                log("User", user_text)
-            else:
-                print_warn("Voice input failed. Switching to text for this turn.")
-                raw = input("You: ").strip()
-                if raw:
-                    user_text = raw.lower()
-                    log("User", raw)
-        else:
-            print_warn("Invalid choice. Enter 1, 2, or 3.")
-            continue
-
+        user_text = read_user_turn(choice, recognizer, voice_available)
         if not user_text:
+            print_warn("No input detected. Please try again.")
             continue
 
-        # ── Generate response ────────────────────────────────────────────────
-        local = get_local_response(user_text)
-
-        if local == "__EXIT__":
-            break
-
-        if local:
-            response = local
-        else:
-            # Add user turn to history and call Claude
-            conversation_history.append({"role": "user", "content": user_text})
-            response = get_ai_response(conversation_history)
-            conversation_history.append({"role": "assistant", "content": response})
-
-        # ── Output ───────────────────────────────────────────────────────────
-        print_jarvis(response)
-        speak(engine, response)
-        log(config.JARVIS_NAME, response)
+        log("User", user_text)
         message_count += 1
 
-    # ── Exit ─────────────────────────────────────────────────────────────────
-    plural = "message" if message_count == 1 else "messages"
+        local_response = get_local_response(user_text)
+        if local_response == EXIT_TOKEN:
+            break
+
+        conversation_history.append({"role": "user", "content": user_text})
+
+        if local_response:
+            response = local_response
+        else:
+            response = get_ai_response(conversation_history)
+
+        conversation_history.append({"role": "assistant", "content": response})
+        deliver_response(engine, response)
+
     farewell = (
-        f"Session complete. We exchanged {message_count} {plural}. "
+        f"Session complete. We exchanged {message_count} messages. "
         f"Goodbye, {config.USER_NAME}. Have a productive day."
     )
     print()
-    print_jarvis(farewell)
-    speak(engine, farewell)
-    log(config.JARVIS_NAME, farewell)
+    deliver_response(engine, farewell)
     log_divider("SESSION ENDED")
 
 

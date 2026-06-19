@@ -1,31 +1,27 @@
 # JARVIS Chatbot
 
-IEEE RAS TRIGGER Daily Task submission by Arjun, SCT College of Engineering.
+JARVIS-style Python chatbot assignment project for the IEEE RAS TRIGGER daily task.
+
+Author: Arjun, SCT College of Engineering, Thiruvananthapuram
 
 ## Features
 
-1. Dual input support with text and voice modes.
-2. Speech-to-text using `speech_recognition` and Google recognition.
-3. Claude-powered AI responses through the Anthropic API.
-4. Local command handling for greetings, time, date, websites, Notepad, identity, and exit.
-5. Dual output with colored console text and spoken responses through `pyttsx3`.
-6. Persistent conversation logging in `conversation_log.txt`.
-7. Session summary on exit.
-8. Graceful text-only fallback when microphone hardware or PyAudio is unavailable.
-9. Voice retry logic and a startup ASCII JARVIS banner.
+- Text input mode with a clean console menu
+- Voice input mode using `SpeechRecognition`
+- Speech-to-text with Google recognition
+- Text-to-speech output using `pyttsx3`
+- Colored console output with `colorama`
+- Timestamped conversation logging
+- Local commands for greetings, name, time, date, websites, help, and exit
+- Gemini-powered general answers when `GEMINI_API_KEY` is set
+- Offline fallback mode when no API key is available
+- Graceful handling for microphone, TTS, recognition, and API failures
 
 ## Prerequisites
 
-- Python 3.8 or newer
-- An Anthropic API key
-- A working microphone for voice mode
-- Windows is recommended for the Notepad command
-
-Set your API key in `config.py`:
-
-```python
-ANTHROPIC_API_KEY = "your-real-api-key"
-```
+- Python 3.9 or newer
+- A Gemini API key for general AI answers
+- A microphone for voice input mode
 
 ## Installation
 
@@ -37,17 +33,54 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
+If `pyaudio` fails to install on Windows, try:
+
+```powershell
+python -m pip install pipwin
+pipwin install pyaudio
+python -m pip install -r requirements.txt
+```
+
+## API Key Setup
+
+The project does not store API keys in source files. Set your Gemini key locally in PowerShell before running:
+
+```powershell
+$env:GEMINI_API_KEY="your_new_key_here"
+```
+
+Do not commit API keys, `.env` files, screenshots showing keys, or terminal output containing secrets.
+
+`ANTHROPIC_API_KEY` is also read safely from the environment for compatibility, but this project uses Gemini for general AI answers.
+
 ## How To Run
 
 ```powershell
 python main.py
 ```
 
-At startup, choose:
+Choose an input mode from the menu:
 
-- `1` for keyboard input
-- `2` for microphone input
+- `1` for text input
+- `2` for voice input
 - `3` to exit
+
+## Demo Instructions
+
+Run the app and test these inputs:
+
+```text
+hello
+what is your name
+what is the time
+what is today's date
+help
+who will win the 2026 world cup?
+explain artificial intelligence in simple words
+bye
+```
+
+With `GEMINI_API_KEY` set, general questions are answered by Gemini. Without a key, JARVIS stays in offline mode and continues to support local commands, speech output, voice input when available, console output, and logging.
 
 ## Folder Structure
 
@@ -58,23 +91,12 @@ jarvis-chatbot/
 ├── requirements.txt
 ├── README.md
 ├── conversation_log.txt
-└── demo_video_link.txt
+├── demo_video_link.txt
+└── .gitignore
 ```
 
-## Known Issues
+## Security Notes
 
-- `pyaudio` can fail to install on Windows with a normal `pip install`.
-- If that happens, install `pipwin` first:
-
-```powershell
-python -m pip install pipwin
-pipwin install pyaudio
-```
-
-- If no microphone is connected, JARVIS automatically disables voice mode and continues in text mode.
-- If the API key is still set to the placeholder value, general AI questions will not call Claude.
-
-## Author
-
-Arjun  
-SCT College of Engineering, Thiruvananthapuram
+- API keys are loaded from environment variables only.
+- `conversation_log.txt`, `.env`, `*.env`, `.venv/`, `__pycache__/`, and `*.pyc` are ignored by Git.
+- Never paste real API keys into `config.py`, `main.py`, `README.md`, or committed files.
